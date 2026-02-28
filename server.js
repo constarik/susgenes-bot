@@ -111,7 +111,7 @@ app.post('/webhook', async (req, res) => {
   if (text === '/start' || text.startsWith('/start ')) {
     await sendTg('sendMessage', {
       chat_id: chatId,
-      text: '🧬 *sus\\.genes* — Bayesian Betting Game\n\nObserve 8 entities on a grid\\. Each has hidden genes: Aggression, Herding, Greed\\.\nWatch their behavior, deduce the genotype, place your bets\\.\n\n🎯 Early bets pay ×6, late bets ×1\\.25\\.\nCan you read the genes?',
+      text: '🧬 *sus\\.genes* — Bayesian Betting Game\n\nObserve 8 entities on a grid\\. Each has hidden genes: Aggression, Herding, Greed\\.\nWatch their behavior, deduce the genotype, place your bets\\.\n\n🎯 Early bets pay ×5, late bets ×1\\.25\\.\nCan you read the genes?',
       parse_mode: 'MarkdownV2',
       reply_markup: {
         inline_keyboard: [[
@@ -126,6 +126,35 @@ app.post('/webhook', async (req, res) => {
       chat_id: chatId,
       text: 'For payment support, contact @constrik'
     });
+  }
+
+  if (text === '/stats') {
+    try {
+      const result = await sendTg('getStarTransactions', { offset: 0, limit: 100 });
+      if (result.ok) {
+        const txs = result.result.transactions || [];
+        let totalIn = 0, totalOut = 0, count = 0;
+        for (const tx of txs) {
+          if (tx.amount > 0) { totalIn += tx.amount; count++; }
+          else { totalOut += Math.abs(tx.amount); }
+        }
+        const net = totalIn - totalOut;
+        await sendTg('sendMessage', {
+          chat_id: chatId,
+          text: `📊 *sus\\.genes — Bot Stats*\n\n` +
+                `💰 Total earned: ${totalIn} Stars\n` +
+                `↩️ Refunded: ${totalOut} Stars\n` +
+                `📈 Net revenue: ${net} Stars\n` +
+                `🧾 Transactions: ${txs.length} \\(${count} payments\\)`,
+          parse_mode: 'MarkdownV2'
+        });
+      } else {
+        await sendTg('sendMessage', { chat_id: chatId, text: '❌ Failed to get stats: ' + (result.description || 'unknown') });
+      }
+    } catch(e) {
+      console.error('stats error:', e);
+      await sendTg('sendMessage', { chat_id: chatId, text: '❌ Error fetching stats' });
+    }
   }
 
   if (text === '/refund') {
