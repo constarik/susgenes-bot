@@ -127,6 +127,37 @@ app.post('/webhook', async (req, res) => {
       text: 'For payment support, contact @constrik'
     });
   }
+
+  if (text === '/refund') {
+    // Find last payment for this user
+    let lastCharge = null;
+    for (const [chargeId, r] of receipts) {
+      if (r.userId === chatId) lastCharge = { chargeId, ...r };
+    }
+    if (lastCharge) {
+      const result = await sendTg('refundStarPayment', {
+        user_id: chatId,
+        telegram_payment_charge_id: lastCharge.chargeId
+      });
+      if (result.ok) {
+        receipts.delete(lastCharge.chargeId);
+        await sendTg('sendMessage', {
+          chat_id: chatId,
+          text: `✅ Refunded ${lastCharge.credits}⭐ pack. Stars returned to your account.`
+        });
+      } else {
+        await sendTg('sendMessage', {
+          chat_id: chatId,
+          text: `❌ Refund failed: ${result.description || 'unknown error'}`
+        });
+      }
+    } else {
+      await sendTg('sendMessage', {
+        chat_id: chatId,
+        text: 'No recent payment found to refund.'
+      });
+    }
+  }
 });
 
 // --- Health check ---
