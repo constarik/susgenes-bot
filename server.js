@@ -22,6 +22,12 @@ const PACKAGES = {
 
 const receipts = new Map();
 
+// === REFERRAL SYSTEM ===
+// referee_id -> { referrerId, refereeClaimed }
+const referrals = new Map();
+// referrer_id -> [{ refereeId, claimed }]
+const referrerBonuses = new Map();
+
 async function sendTg(method, body) {
   const r = await fetch(`${BOT_URL}/${method}`, {
     method: 'POST',
@@ -109,6 +115,25 @@ app.post('/webhook', async (req, res) => {
   const text = msg.text || '';
 
   if (text === '/start' || text.startsWith('/start ')) {
+    // Handle referral
+    const refMatch = text.match(/\/start\s+ref_(\d+)/);
+    if (refMatch) {
+      const referrerId = parseInt(refMatch[1]);
+      const refereeId = chatId;
+      if (referrerId && referrerId !== refereeId && !referrals.has(refereeId)) {
+        referrals.set(refereeId, { referrerId, refereeClaimed: false });
+        if (!referrerBonuses.has(referrerId)) referrerBonuses.set(referrerId, []);
+        referrerBonuses.get(referrerId).push({ refereeId, claimed: false });
+        console.log(`Referral: ${referrerId} -> ${refereeId}`);
+        // Notify referrer
+        sendTg('sendMessage', {
+          chat_id: referrerId,
+          text: '🎉 A friend joined via your link\\!\nOpen the game to claim your \\+100⭐ bonus\\.',
+          parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: [[ { text: '🎮 Claim Bonus', web_app: { url: GAME_URL } } ]] }
+        });
+      }
+    }
     await sendTg('sendMessage', {
       chat_id: chatId,
       text: '🧬 *sus\\.genes* — Bayesian Betting Game\n\nObserve 8 entities on a grid\\. Each has hidden genes: Aggression, Herding, Greed\\.\nWatch their behavior, deduce the genotype, place your bets\\.\n\n🎯 Early bets pay ×5, late bets ×1\\.25\\.\nCan you read the genes?',
@@ -187,6 +212,58 @@ app.post('/webhook', async (req, res) => {
       });
     }
   }
+});
+
+// --- Referral bonus check ---
+app.get('/referral-bonus', (req, res) => {
+  const userId = parseInt(req.query.userId);
+  if (!userId) return res.json({ bonus: 0 });
+
+  let bonus = 0, type = null, count = 0;
+
+  // Check if user is a referee with unclaimed bonus
+  const ref = referrals.get(userId);
+  if (ref && !ref.refereeClaimed) {
+    bonus += 100;
+    type = 'referee';
+  }
+
+  // Check if user is a referrer with unclaimed bonuses
+  const bList = referrerBonuses.get(userId);
+  if (bList) {
+    const unclaimed = bList.filter(b => !b.claimed);
+    if (unclaimed.length > 0) {
+      bonus += unclaimed.length * 100;
+      count = unclaimed.length;
+      type = type ? 'both' : 'referrer';
+    }
+  }
+
+  res.json({ bonus, type, count });
+});
+
+// --- Claim referral bonus ---
+app.post('/claim-referral', (req, res) => {
+  const uid = parseInt(req.body.userId);
+  if (!uid) return res.json({ claimed: 0 });
+
+  let totalClaimed = 0;
+
+  const ref = referrals.get(uid);
+  if (ref && !ref.refereeClaimed) {
+    ref.refereeClaimed = true;
+    totalClaimed += 100;
+  }
+
+  const bList = referrerBonuses.get(uid);
+  if (bList) {
+    for (const b of bList) {
+      if (!b.claimed) { b.claimed = true; totalClaimed += 100; }
+    }
+  }
+
+  console.log(`Referral claim: user=${uid} amount=${totalClaimed}`);
+  res.json({ claimed: totalClaimed });
 });
 
 // --- Health check ---
