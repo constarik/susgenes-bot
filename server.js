@@ -28,6 +28,21 @@ const referrals = new Map();
 // referrer_id -> [{ refereeId, claimed }]
 const referrerBonuses = new Map();
 
+// === PLAYER TRACKING ===
+// userId -> { firstSeen, lastSeen, sessions, source }
+const players = new Map();
+
+function trackPlayer(userId, source) {
+  const now = Date.now();
+  if (players.has(userId)) {
+    const p = players.get(userId);
+    p.lastSeen = now;
+    p.sessions++;
+  } else {
+    players.set(userId, { firstSeen: now, lastSeen: now, sessions: 1, source });
+  }
+}
+
 async function sendTg(method, body) {
   const r = await fetch(`${BOT_URL}/${method}`, {
     method: 'POST',
@@ -115,6 +130,9 @@ app.post('/webhook', async (req, res) => {
   const text = msg.text || '';
 
   if (text === '/start' || text.startsWith('/start ')) {
+    // Track player from /start
+    trackPlayer(chatId, 'bot');
+
     // Handle referral
     const refMatch = text.match(/\/start\s+ref_(\d+)/);
     if (refMatch) {
@@ -156,26 +174,47 @@ app.post('/webhook', async (req, res) => {
   if (text === '/stats') {
     try {
       const result = await sendTg('getStarTransactions', { offset: 0, limit: 100 });
-      if (result.ok) {
-        const txs = result.result.transactions || [];
-        let totalIn = 0, totalOut = 0, count = 0;
-        for (const tx of txs) {
-          if (tx.amount > 0) { totalIn += tx.amount; count++; }
-          else { totalOut += Math.abs(tx.amount); }
+      const txs = result.ok ? (result.result.transactions || []) : [];
+      let totalIn = 0, totalOut = 0, payCount = 0;
+      const payingUsers = new Set();
+      for (const tx of txs) {
+        if (tx.amount > 0) {
+          totalIn += tx.amount;
+          payCount++;
+          if (tx.source?.user?.id) payingUsers.add(tx.source.user.id);
+        } else {
+          totalOut += Math.abs(tx.amount);
         }
-        const net = totalIn - totalOut;
-        await sendTg('sendMessage', {
-          chat_id: chatId,
-          text: `📊 *sus\\.genes — Bot Stats*\n\n` +
-                `💰 Total earned: ${totalIn} Stars\n` +
-                `↩️ Refunded: ${totalOut} Stars\n` +
-                `📈 Net revenue: ${net} Stars\n` +
-                `🧾 Transactions: ${txs.length} \\(${count} payments\\)`,
-          parse_mode: 'MarkdownV2'
-        });
-      } else {
-        await sendTg('sendMessage', { chat_id: chatId, text: '❌ Failed to get stats: ' + (result.description || 'unknown') });
       }
+      const net = totalIn - totalOut;
+
+      // Player stats
+      const now = Date.now();
+      const DAY = 86400000;
+      const WEEK = 7 * DAY;
+      let total = players.size;
+      let active24h = 0, active7d = 0;
+      for (const [, p] of players) {
+        if (now - p.lastSeen < DAY) active24h++;
+        if (now - p.lastSeen < WEEK) active7d++;
+      }
+
+      await sendTg('sendMessage', {
+        chat_id: chatId,
+        text: `📊 *sus\\.genes — Stats*\n\n` +
+              `👥 *Players*\n` +
+              `Total: ${total}\n` +
+              `Active 24h: ${active24h}\n` +
+              `Active 7d: ${active7d}\n` +
+              `Referrals: ${referrals.size}\n\n` +
+              `💰 *Revenue*\n` +
+              `Earned: ${totalIn} Stars\n` +
+              `Refunded: ${totalOut} Stars\n` +
+              `Net: ${net} Stars\n` +
+              `Payments: ${payCount}\n` +
+              `Paying users: ${payingUsers.size}`,
+        parse_mode: 'MarkdownV2'
+      });
     } catch(e) {
       console.error('stats error:', e);
       await sendTg('sendMessage', { chat_id: chatId, text: '❌ Error fetching stats' });
@@ -211,6 +250,17 @@ app.post('/webhook', async (req, res) => {
         text: 'No recent payment found to refund.'
       });
     }
+  }
+});
+
+// --- Player ping from game client ---
+app.post('/ping', (req, res) => {
+  const userId = parseInt(req.body.userId);
+  if (userId) {
+    trackPlayer(userId, 'game');
+    res.json({ ok: true });
+  } else {
+    res.json({ ok: false });
   }
 });
 
@@ -268,7 +318,7 @@ app.post('/claim-referral', (req, res) => {
 
 // --- Health check ---
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', bot: 'susgenes', packages: Object.keys(PACKAGES) });
+  res.json({ status: 'ok', bot: 'susgenes', packages: Object.keys(PACKAGES), players: players.size });
 });
 
 // --- Packages info for client ---
