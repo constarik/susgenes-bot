@@ -334,13 +334,22 @@ app.post('/claim-referral', (req, res) => {
 // --- Health check ---
 app.get('/', async (req, res) => {
   let playerCount = 0;
+  let fbStatus = 'no env var';
   if (db) {
     try {
       const snap = await db.collection('players').count().get();
       playerCount = snap.data().count;
-    } catch(e) {}
+      fbStatus = 'connected';
+    } catch(e) { fbStatus = 'error: ' + e.message; }
+  } else {
+    // Check why db is null
+    const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+    if (raw) {
+      try { const p = JSON.parse(raw); fbStatus = 'parsed but db null, project: ' + (p.project_id || 'none'); } 
+      catch(e) { fbStatus = 'JSON parse failed: ' + e.message; }
+    }
   }
-  res.json({ status: 'ok', bot: 'susgenes', packages: Object.keys(PACKAGES), players: playerCount });
+  res.json({ status: 'ok', bot: 'susgenes', firebase: fbStatus, players: playerCount });
 });
 
 // --- Packages info for client ---
