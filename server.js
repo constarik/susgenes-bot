@@ -1,5 +1,16 @@
 const express = require('express');
+const admin = require('firebase-admin');
 const app = express();
+
+// === FIREBASE INIT ===
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+if (serviceAccount.project_id) {
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  console.log('Firebase initialized: ' + serviceAccount.project_id);
+} else {
+  console.warn('No FIREBASE_SERVICE_ACCOUNT — player tracking disabled');
+}
+const db = serviceAccount.project_id ? admin.firestore() : null;
 
 // CORS — before routes
 app.use((req, res, next) => {
@@ -23,23 +34,41 @@ const PACKAGES = {
 const receipts = new Map();
 
 // === REFERRAL SYSTEM ===
-// referee_id -> { referrerId, refereeClaimed }
 const referrals = new Map();
-// referrer_id -> [{ refereeId, claimed }]
 const referrerBonuses = new Map();
 
-// === PLAYER TRACKING ===
-// userId -> { firstSeen, lastSeen, sessions, source }
-const players = new Map();
-
-function trackPlayer(userId, source) {
+// === PLAYER TRACKING (Firestore) ===
+async function trackPlayer(userId, source) {
+  if (!db) return;
   const now = Date.now();
-  if (players.has(userId)) {
-    const p = players.get(userId);
-    p.lastSeen = now;
-    p.sessions++;
-  } else {
-    players.set(userId, { firstSeen: now, lastSeen: now, sessions: 1, source });
+  const ref = db.collection('players').doc(String(userId));
+  try {
+    const doc = await ref.get();
+    if (doc.exists) {
+      await ref.update({ lastSeen: now, sessions: admin.firestore.FieldValue.increment(1) });
+    } else {
+      await ref.set({ firstSeen: now, lastSeen: now, sessions: 1, source });
+    }
+  } catch(e) { console.error('trackPlayer error:', e.message); }
+}
+
+async function getPlayerStats() {
+  if (!db) return { total: 0, active24h: 0, active7d: 0 };
+  try {
+    const now = Date.now();
+    const DAY = 86400000;
+    const WEEK = 7 * DAY;
+    const snap = await db.collection('players').get();
+    let total = snap.size, active24h = 0, active7d = 0;
+    snap.forEach(doc => {
+      const d = doc.data();
+      if (now - d.lastSeen < DAY) active24h++;
+      if (now - d.lastSeen < WEEK) active7d++;
+    });
+    return { total, active24h, active7d };
+  } catch(e) {
+    console.error('getPlayerStats error:', e.message);
+    return { total: 0, active24h: 0, active7d: 0 };
   }
 }
 
@@ -104,7 +133,6 @@ app.post('/webhook', async (req, res) => {
     const pack = PACKAGES[packData.packId];
     const credits = pack ? pack.credits : 0;
 
-    // Store receipt for potential refunds
     receipts.set(payment.telegram_payment_charge_id, {
       userId, packId: packData.packId, credits, ts: Date.now()
     });
@@ -130,7 +158,6 @@ app.post('/webhook', async (req, res) => {
   const text = msg.text || '';
 
   if (text === '/start' || text.startsWith('/start ')) {
-    // Track player from /start
     trackPlayer(chatId, 'bot');
 
     // Handle referral
@@ -143,7 +170,6 @@ app.post('/webhook', async (req, res) => {
         if (!referrerBonuses.has(referrerId)) referrerBonuses.set(referrerId, []);
         referrerBonuses.get(referrerId).push({ refereeId, claimed: false });
         console.log(`Referral: ${referrerId} -> ${refereeId}`);
-        // Notify referrer
         sendTg('sendMessage', {
           chat_id: referrerId,
           text: '🎉 A friend joined via your link\\!\nOpen the game to claim your \\+100⭐ bonus\\.',
@@ -188,24 +214,16 @@ app.post('/webhook', async (req, res) => {
       }
       const net = totalIn - totalOut;
 
-      // Player stats
-      const now = Date.now();
-      const DAY = 86400000;
-      const WEEK = 7 * DAY;
-      let total = players.size;
-      let active24h = 0, active7d = 0;
-      for (const [, p] of players) {
-        if (now - p.lastSeen < DAY) active24h++;
-        if (now - p.lastSeen < WEEK) active7d++;
-      }
+      // Player stats from Firestore
+      const ps = await getPlayerStats();
 
       await sendTg('sendMessage', {
         chat_id: chatId,
         text: `📊 *sus\\.genes — Stats*\n\n` +
               `👥 *Players*\n` +
-              `Total: ${total}\n` +
-              `Active 24h: ${active24h}\n` +
-              `Active 7d: ${active7d}\n` +
+              `Total: ${ps.total}\n` +
+              `Active 24h: ${ps.active24h}\n` +
+              `Active 7d: ${ps.active7d}\n` +
               `Referrals: ${referrals.size}\n\n` +
               `💰 *Revenue*\n` +
               `Earned: ${totalIn} Stars\n` +
@@ -222,7 +240,6 @@ app.post('/webhook', async (req, res) => {
   }
 
   if (text === '/refund') {
-    // Find last payment for this user
     let lastCharge = null;
     for (const [chargeId, r] of receipts) {
       if (r.userId === chatId) lastCharge = { chargeId, ...r };
@@ -271,14 +288,12 @@ app.get('/referral-bonus', (req, res) => {
 
   let bonus = 0, type = null, count = 0;
 
-  // Check if user is a referee with unclaimed bonus
   const ref = referrals.get(userId);
   if (ref && !ref.refereeClaimed) {
     bonus += 100;
     type = 'referee';
   }
 
-  // Check if user is a referrer with unclaimed bonuses
   const bList = referrerBonuses.get(userId);
   if (bList) {
     const unclaimed = bList.filter(b => !b.claimed);
@@ -317,8 +332,15 @@ app.post('/claim-referral', (req, res) => {
 });
 
 // --- Health check ---
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', bot: 'susgenes', packages: Object.keys(PACKAGES), players: players.size });
+app.get('/', async (req, res) => {
+  let playerCount = 0;
+  if (db) {
+    try {
+      const snap = await db.collection('players').count().get();
+      playerCount = snap.data().count;
+    } catch(e) {}
+  }
+  res.json({ status: 'ok', bot: 'susgenes', packages: Object.keys(PACKAGES), players: playerCount });
 });
 
 // --- Packages info for client ---
