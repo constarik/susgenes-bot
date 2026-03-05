@@ -329,5 +329,23 @@ app.get('/packages', (req, res) => {
   res.json(list);
 });
 
+// --- Register bot commands menu ---
+async function registerCommands() {
+  try {
+    await sendTg('setMyCommands', {
+      commands: [
+        { command: 'start', description: 'Start the game' },
+        { command: 'stats', description: 'Game statistics' },
+        { command: 'paysupport', description: 'Payment support' },
+        { command: 'refund', description: 'Refund last payment' }
+      ]
+    });
+    console.log('Bot commands registered');
+  } catch(e) { console.error('setMyCommands error:', e); }
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bot server on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Bot server on port ${PORT}`);
+  registerCommands();
+});
